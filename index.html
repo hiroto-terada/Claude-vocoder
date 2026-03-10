@@ -217,7 +217,7 @@
   <div class="ctrl-row">
     <div class="ctrl-lbl">マイク感度</div>
     <input type="range" id="ctrl-sens" min="5" max="60" value="25">
-    <div class="ctrl-val" id="val-sens">-25dB</div>
+    <div class="ctrl-val" id="val-sens">×25</div>
   </div>
   <div class="ctrl-row">
     <div class="ctrl-lbl">キャリア波形</div>
@@ -323,12 +323,17 @@ function buildKeyboard() {
 // ─────────────────────────────────────────────────────
 // ボコーダー (Web Audio API)
 // ─────────────────────────────────────────────────────
-// 【アーキテクチャ】
-// 従来の AudioParam 直接接続方式はノイズフロアがゼロにならない問題がある。
-// → AnalyserNode で FFT を取り、各バンドのエネルギーを dB で測定し
-//   dB しきい値でノイズゲーティングしてから gain を JS で設定する方式に変更。
-// mic → AnalyserNode (FFT 2048) → JS loop → envGain.gain (各バンド)
-// osc → BPF (各バンド) → envGain → masterGain → compressor → destination
+// 【アーキテクチャ】音声レート・ゼロ遅延ボコーダー
+//
+// 各バンドで独立したエンベロープフォロワーをオーディオグラフ内に構築し、
+// AudioParam への直接接続でサンプル単位のリアルタイム制御を実現する。
+// JS ループ・FFT は一切不要。
+//
+// モジュレーター(マイク)パス:
+//   mic → modBPF[i] → WaveShaper(abs整流) → LPF(エンベロープ抽出) → preGain → envGain[i].gain
+//
+// キャリア(発振器)パス:
+//   osc → carBPF[i] → envGain[i] → masterGain → comp → destination
 
 const NUM_BANDS = 24;
 const FREQ_MIN  = 80;
@@ -342,9 +347,9 @@ function bandFrequencies() {
 
 // グローバル Audio オブジェクト
 let audioCtx, micSource, oscillator, masterGain;
-let meterAnalyser, vocoderAnalyser;
-let meterRaf, vocoderRaf;
-let bands = [];
+let meterAnalyser;
+let meterRaf;
+let bands = []; // 各バンドの { preGain } を保持
 
 async function startAudio() {
   try {
@@ -369,28 +374,17 @@ async function startAudio() {
     micSource.connect(meterAnalyser);
     startMeter();
 
-    // ボコーダー用アナライザ（高精度 FFT でバンドエネルギーを測定）
-    vocoderAnalyser = audioCtx.createAnalyser();
-    vocoderAnalyser.fftSize = 2048;
-    vocoderAnalyser.smoothingTimeConstant = 0.5;  // 適度な追従速度
-    micSource.connect(vocoderAnalyser);
-
-    // 出力チェーン: masterGain → compressor → makeupGain → destination
-    // BPF で各帯域に絞られた倍音は振幅が小さいため、
-    // compressor の後に固定ブースト (makeupGain) を入れて音量を確保する
+    // 出力チェーン: masterGain → compressor → destination
     masterGain = audioCtx.createGain();
     masterGain.gain.value = 0;  // 鍵盤押下で開く
     const comp = audioCtx.createDynamicsCompressor();
-    comp.threshold.value = -24;
-    comp.knee.value      = 8;
+    comp.threshold.value = -18;
+    comp.knee.value      = 6;
     comp.ratio.value     = 4;
-    comp.attack.value    = 0.003;
-    comp.release.value   = 0.12;
-    const makeupGain = audioCtx.createGain();
-    makeupGain.gain.value = 6;  // 固定ブースト: BPF 減衰分を補償
+    comp.attack.value    = 0.002;
+    comp.release.value   = 0.1;
     masterGain.connect(comp);
-    comp.connect(makeupGain);
-    makeupGain.connect(audioCtx.destination);
+    comp.connect(audioCtx.destination);
 
     // キャリア発振器
     oscillator = audioCtx.createOscillator();
@@ -398,35 +392,55 @@ async function startAudio() {
     oscillator.frequency.value = 440;
     oscillator.start();
 
-    // キャリアバンドを構築: osc → BPF[i] → envGain[i] → masterGain
-    const freqs      = bandFrequencies();
-    const binWidth   = audioCtx.sampleRate / vocoderAnalyser.fftSize;
-    const binCount   = vocoderAnalyser.frequencyBinCount;
+    // abs整流用 WaveShaper カーブ（全バンド共用の定義。ノードは各バンドで独立）
+    const absCurve = new Float32Array(256);
+    for (let i = 0; i < 256; i++) absCurve[i] = Math.abs((i / 127.5) - 1);
 
-    bands = freqs.map((f, i) => {
-      const carBP = audioCtx.createBiquadFilter();
-      carBP.type            = 'bandpass';
-      carBP.frequency.value = f;
-      carBP.Q.value         = 2.0;
+    const initSens = parseFloat(document.getElementById('ctrl-sens').value);
+    const freqs    = bandFrequencies();
+
+    bands = freqs.map(f => {
+      // ── モジュレーターパス ──────────────────────────────────
+      // mic → modBPF → 整流 → LPF(エンベロープ) → preGain → envGain.gain
+      const modBPF = audioCtx.createBiquadFilter();
+      modBPF.type            = 'bandpass';
+      modBPF.frequency.value = f;
+      modBPF.Q.value         = 2.5;
+
+      const rect = audioCtx.createWaveShaper();
+      rect.curve = absCurve;          // abs() = 全波整流
+
+      const envLP = audioCtx.createBiquadFilter();
+      envLP.type            = 'lowpass';
+      envLP.frequency.value = 30;     // 30 Hz ≈ 5ms: 声のエンベロープに十分追従
+      envLP.Q.value         = 0.5;
+
+      const preGain = audioCtx.createGain();
+      preGain.gain.value = initSens;  // 感度スライダーで可変
+
+      // ── キャリアパス ────────────────────────────────────────
+      // osc → carBPF → envGain(音声レート制御) → masterGain
+      const carBPF = audioCtx.createBiquadFilter();
+      carBPF.type            = 'bandpass';
+      carBPF.frequency.value = f;
+      carBPF.Q.value         = 2.0;
 
       const envGain = audioCtx.createGain();
-      envGain.gain.value = 0;
+      envGain.gain.value = 0;         // ベース値0 + audio-rate加算
 
-      oscillator.connect(carBP);
-      carBP.connect(envGain);
+      // 接続
+      micSource.connect(modBPF);
+      modBPF.connect(rect);
+      rect.connect(envLP);
+      envLP.connect(preGain);
+      preGain.connect(envGain.gain); // AudioParam に直結 → サンプル単位で制御
+
+      oscillator.connect(carBPF);
+      carBPF.connect(envGain);
       envGain.connect(masterGain);
 
-      // このバンドが担当する FFT ビン範囲を計算
-      const fLo = i > 0              ? (freqs[i-1] + f) / 2 : FREQ_MIN;
-      const fHi = i < freqs.length-1 ? (f + freqs[i+1]) / 2 : FREQ_MAX;
-      const binLo = Math.max(0,          Math.round(fLo / binWidth));
-      const binHi = Math.min(binCount-1, Math.round(fHi / binWidth));
-
-      return { envGain, binLo, binHi };
+      return { preGain };
     });
-
-    // ボコーダー更新ループを開始
-    startVocoderLoop();
 
     document.getElementById('start-btn').style.display = 'none';
     setStatus('ok', '✓ マイク起動中 — 鍵盤を押しながら声を出してください');
@@ -437,40 +451,6 @@ async function startAudio() {
   }
 }
 
-// ─────────────────────────────────────────────────────
-// ボコーダー更新ループ (FFT ベースのバンドエネルギー → gain 制御)
-// ─────────────────────────────────────────────────────
-function startVocoderLoop() {
-  const dbData = new Float32Array(vocoderAnalyser.frequencyBinCount);
-
-  function update() {
-    vocoderAnalyser.getFloatFrequencyData(dbData);
-
-    // 感度スライダー値でノイズフロアを決定
-    // sensVal 5-60, default=25 → noiseFloor -5〜-60 dBFS
-    // iPhone 環境ノイズは約 -50〜-40 dBFS なので
-    // デフォルト -25 dBFS では声のみ通過、環境音はゲートされる
-    const sensVal    = parseFloat(document.getElementById('ctrl-sens').value);
-    const noiseFloor = -sensVal;
-
-    bands.forEach(band => {
-      // バンド内のビンのエネルギーを平均 (dBFS)
-      let sum = 0;
-      const count = band.binHi - band.binLo + 1;
-      for (let b = band.binLo; b <= band.binHi; b++) sum += dbData[b];
-      const dB = count > 0 ? sum / count : -Infinity;
-
-      // dB → gain: noiseFloor 以下は完全ゼロ、そこから 40dB 幅で 0→1 にマップ
-      const gain = Math.max(0, Math.min(4, (dB - noiseFloor) / 30));
-
-      // 滑らかに遷移 (時定数 8ms)
-      band.envGain.gain.setTargetAtTime(gain, audioCtx.currentTime, 0.008);
-    });
-
-    vocoderRaf = requestAnimationFrame(update);
-  }
-  update();
-}
 
 // ─────────────────────────────────────────────────────
 // レベルメーター
@@ -591,11 +571,13 @@ function setupControls() {
     }
   });
 
-  // マイク感度 → ボコーダーループ内で参照するだけなので表示更新のみ
+  // マイク感度 → 各バンドの preGain を即時更新
   const sensSlider = document.getElementById('ctrl-sens');
   const valSens    = document.getElementById('val-sens');
   sensSlider.addEventListener('input', () => {
-    valSens.textContent = '-' + sensSlider.value + 'dB';
+    const v = parseFloat(sensSlider.value);
+    valSens.textContent = '×' + v;
+    bands.forEach(b => { b.preGain.gain.value = v; });
   });
 
   // キャリア波形
