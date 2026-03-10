@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Vocoder</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+      background: #0d0d1a;
+      color: #dde;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      overflow-x: hidden;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* ── ヘッダー ── */
+    .header {
+      margin: 22px 0 8px;
+      font-size: 30px;
+      font-weight: 800;
+      letter-spacing: 10px;
+      background: linear-gradient(130deg, #64b5f6 30%, #e040fb 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    /* ── ステータス ── */
+    #status {
+      font-size: 13px;
+      color: #666;
+      text-align: center;
+      padding: 6px 24px;
+      min-height: 32px;
+      transition: color 0.3s;
+    }
+    #status.ok     { color: #66bb6a; }
+    #status.playing { color: #64b5f6; }
+    #status.err    { color: #ef5350; }
+
+    /* ── 起動ボタン ── */
+    #start-btn {
+      margin: 10px 0;
+      padding: 14px 52px;
+      font-size: 17px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #1565c0, #7b1fa2);
+      color: #fff;
+      border: none;
+      border-radius: 32px;
+      cursor: pointer;
+      box-shadow: 0 4px 24px rgba(100,181,246,0.3);
+      transition: opacity 0.12s, transform 0.1s;
+    }
+    #start-btn:active { opacity: 0.75; transform: scale(0.96); }
+
+    /* ── レベルメーター ── */
+    #meter-wrap {
+      width: 88%;
+      max-width: 440px;
+      height: 5px;
+      background: #1c1c2e;
+      border-radius: 3px;
+      overflow: hidden;
+      margin: 4px 0 12px;
+    }
+    #meter-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(to right, #66bb6a 0%, #ffee58 70%, #ef5350 100%);
+      border-radius: 3px;
+      transition: width 0.04s linear;
+    }
+
+    /* ── 鍵盤 ── */
+    #kb-wrap {
+      width: 100%;
+      overflow-x: auto;
+      overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+      padding: 8px 0 20px;
+      scrollbar-width: none;
+    }
+    #kb-wrap::-webkit-scrollbar { display: none; }
+
+    #keyboard {
+      position: relative;
+      margin: 0 auto;
+      touch-action: none;
+    }
+
+    .wk {
+      position: absolute;
+      background: linear-gradient(175deg, #f6f6f6 0%, #d8d8d8 100%);
+      border: 1px solid #aaa;
+      border-radius: 0 0 8px 8px;
+      cursor: pointer;
+      z-index: 1;
+      transition: background 0.06s;
+    }
+    .wk.on {
+      background: linear-gradient(175deg, #90caf9 0%, #1976d2 100%);
+      border-color: #1565c0;
+      box-shadow: 0 6px 16px rgba(100,181,246,0.55);
+    }
+    .wk .klabel {
+      position: absolute;
+      bottom: 7px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 10px;
+      font-weight: 700;
+      color: #999;
+      white-space: nowrap;
+    }
+    .wk.on .klabel { color: #fff; }
+
+    .bk {
+      position: absolute;
+      background: linear-gradient(175deg, #383850 0%, #111120 100%);
+      border-radius: 0 0 6px 6px;
+      cursor: pointer;
+      z-index: 2;
+      box-shadow: 2px 5px 10px rgba(0,0,0,0.7);
+      transition: background 0.06s;
+    }
+    .bk.on {
+      background: linear-gradient(175deg, #ea80fc 0%, #7b1fa2 100%);
+      box-shadow: 0 6px 16px rgba(224,64,251,0.5);
+    }
+
+    /* ── コントロール ── */
+    #controls {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      width: 88%;
+      max-width: 440px;
+      background: #171727;
+      border-radius: 18px;
+      padding: 18px 20px;
+      margin: 4px 0 0;
+    }
+    .ctrl-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .ctrl-lbl {
+      font-size: 11px;
+      color: #777;
+      width: 70px;
+      flex-shrink: 0;
+      letter-spacing: 0.3px;
+    }
+    .ctrl-row input[type=range] {
+      flex: 1;
+      accent-color: #64b5f6;
+      cursor: pointer;
+    }
+    .ctrl-row select {
+      flex: 1;
+      background: #0d0d1a;
+      color: #dde;
+      border: 1px solid #2a2a3e;
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 13px;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+    .ctrl-val {
+      font-size: 12px;
+      color: #64b5f6;
+      width: 34px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ── ヒント ── */
+    .hint {
+      font-size: 12px;
+      color: #444;
+      text-align: center;
+      line-height: 2;
+      padding: 14px 24px 40px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">VOCODER</div>
+
+<div id="status">マイクを起動してください</div>
+
+<button id="start-btn">🎤 マイクを起動</button>
+
+<div id="meter-wrap"><div id="meter-bar"></div></div>
+
+<div id="kb-wrap">
+  <div id="keyboard"></div>
+</div>
+
+<div id="controls">
+  <div class="ctrl-row">
+    <div class="ctrl-lbl">音量</div>
+    <input type="range" id="ctrl-vol" min="0" max="100" value="75">
+    <div class="ctrl-val" id="val-vol">75</div>
+  </div>
+  <div class="ctrl-row">
+    <div class="ctrl-lbl">マイク感度</div>
+    <input type="range" id="ctrl-sens" min="1" max="30" value="10">
+    <div class="ctrl-val" id="val-sens">10</div>
+  </div>
+  <div class="ctrl-row">
+    <div class="ctrl-lbl">キャリア波形</div>
+    <select id="ctrl-wave">
+      <option value="sawtooth">のこぎり波</option>
+      <option value="square">矩形波</option>
+      <option value="triangle">三角波</option>
+    </select>
+  </div>
+</div>
+
+<div class="hint">
+  声を出しながら鍵盤をタップ・スライドして演奏<br>
+  ※ HTTPSまたはlocalhostでご利用ください
+</div>
+
+<script>
+'use strict';
+
+// ─────────────────────────────────────────────────────
+// 音程ユーティリティ
+// ─────────────────────────────────────────────────────
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+function midiToHz(n) { return 440 * Math.pow(2, (n - 69) / 12); }
+
+// ─────────────────────────────────────────────────────
+// 鍵盤レイアウト定数
+// ─────────────────────────────────────────────────────
+const OCT_START  = 2;   // C2 from
+const OCT_COUNT  = 4;   // 4 octaves: C2–B5
+const MIDI_START = (OCT_START + 1) * 12;  // 36 = C2
+
+const WW = 48, WH = 164, BW = 30, BH = 104, KB_TOP = 12;
+const PAD = 20;
+
+// note-in-octave (0–11) → white-key index within octave (null = black key)
+const N2W = [0, null, 1, null, 2, 3, null, 4, null, 5, null, 6];
+// note-in-octave → black-key position in white-key units (null = white key)
+const N2B = [null, 1, null, 2, null, null, 4, null, 5, null, 6, null];
+
+// ─────────────────────────────────────────────────────
+// 鍵盤DOM生成
+// ─────────────────────────────────────────────────────
+function buildKeyboard() {
+  const kb = document.getElementById('keyboard');
+  kb.innerHTML = '';
+
+  const totalWhite = OCT_COUNT * 7 + 1;
+  kb.style.width  = (totalWhite * WW + PAD * 2) + 'px';
+  kb.style.height = (WH + KB_TOP + 10) + 'px';
+
+  function key(cls, midi, leftPx, w, h) {
+    const el = document.createElement('div');
+    el.className = cls;
+    el.dataset.midi = midi;
+    el.dataset.hz   = midiToHz(midi).toFixed(3);
+    el.style.cssText = `left:${leftPx}px;top:${KB_TOP}px;width:${w}px;height:${h}px;`;
+    return el;
+  }
+
+  for (let oct = 0; oct < OCT_COUNT; oct++) {
+    const octX   = oct * 7 * WW + PAD;
+    const octNum = OCT_START + oct;
+
+    for (let note = 0; note < 12; note++) {
+      const midi = MIDI_START + oct * 12 + note;
+      const wi   = N2W[note];
+
+      if (wi !== null) {
+        const el = key('wk', midi, octX + wi * WW, WW, WH);
+        if (note === 0) {
+          const lbl = document.createElement('div');
+          lbl.className   = 'klabel';
+          lbl.textContent = 'C' + octNum;
+          el.appendChild(lbl);
+        }
+        kb.appendChild(el);
+      } else {
+        const bp = N2B[note];
+        kb.appendChild(key('bk', midi, octX + bp * WW - BW / 2, BW, BH));
+      }
+    }
+  }
+
+  // 最後の C
+  const lastMidi = MIDI_START + OCT_COUNT * 12;
+  const last = key('wk', lastMidi, OCT_COUNT * 7 * WW + PAD, WW, WH);
+  const lbl2 = document.createElement('div');
+  lbl2.className   = 'klabel';
+  lbl2.textContent = 'C' + (OCT_START + OCT_COUNT);
+  last.appendChild(lbl2);
+  kb.appendChild(last);
+
+  // 初期スクロール位置: C3 (中央付近) に合わせる
+  requestAnimationFrame(() => {
+    const wrap = document.getElementById('kb-wrap');
+    const c3X  = (1 * 7 * WW + PAD);      // 1オクターブ目 = C3
+    const center = c3X - (wrap.clientWidth - WW * 7) / 2;
+    wrap.scrollLeft = Math.max(0, center);
+  });
+}
+
+// ─────────────────────────────────────────────────────
+// ボコーダー (Web Audio API)
+// ─────────────────────────────────────────────────────
+const NUM_BANDS  = 16;
+const FREQ_MIN   = 80;
+const FREQ_MAX   = 8000;
+const ENV_HZ     = 25;   // エンベロープフォロワーのカットオフ
+
+function bandFrequencies() {
+  return Array.from({ length: NUM_BANDS }, (_, i) =>
+    FREQ_MIN * Math.pow(FREQ_MAX / FREQ_MIN, i / (NUM_BANDS - 1))
+  );
+}
+
+// |x| を計算する WaveShaperNode（エンベロープ検波用）
+function makeAbsShaper(ctx) {
+  const ws = ctx.createWaveShaper();
+  const n  = 512;
+  const c  = new Float32Array(n);
+  for (let i = 0; i < n; i++) c[i] = Math.abs((i * 2 / (n - 1)) - 1);
+  ws.curve = c;
+  return ws;
+}
+
+// グローバル Audio オブジェクト
+let audioCtx, micSource, oscillator, masterGain, micBoost;
+let meterAnalyser, meterRaf;
+let bands = [];
+
+async function startAudio() {
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+      latencyHint: 'interactive',
+    });
+    if (audioCtx.state !== 'running') await audioCtx.resume();
+
+    // マイク取得
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      }
+    });
+    micSource = audioCtx.createMediaStreamSource(stream);
+
+    // マイク感度ゲイン
+    micBoost = audioCtx.createGain();
+    micBoost.gain.value = parseFloat(document.getElementById('ctrl-sens').value);
+    micSource.connect(micBoost);
+
+    // レベルメーター用アナライザ
+    meterAnalyser = audioCtx.createAnalyser();
+    meterAnalyser.fftSize = 256;
+    micSource.connect(meterAnalyser);
+    startMeter();
+
+    // マスターゲイン (鍵盤押下で開く)
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0;
+    masterGain.connect(audioCtx.destination);
+
+    // キャリア発振器
+    oscillator = audioCtx.createOscillator();
+    oscillator.type = document.getElementById('ctrl-wave').value;
+    oscillator.frequency.value = 440;
+    oscillator.start();
+
+    // ボコーダーバンドを構築
+    const freqs = bandFrequencies();
+    bands = freqs.map(f => {
+      // ── モジュレーター (声) チェーン ──────────────────
+      const modBP = audioCtx.createBiquadFilter();
+      modBP.type            = 'bandpass';
+      modBP.frequency.value = f;
+      modBP.Q.value         = 2.5;
+
+      const rect = makeAbsShaper(audioCtx);   // |x| → 半波整流
+
+      const smth = audioCtx.createBiquadFilter();  // エンベロープ平滑化
+      smth.type            = 'lowpass';
+      smth.frequency.value = ENV_HZ;
+      smth.Q.value         = 0.5;
+
+      // ── キャリア (発振器) チェーン ────────────────────
+      const carBP = audioCtx.createBiquadFilter();
+      carBP.type            = 'bandpass';
+      carBP.frequency.value = f;
+      carBP.Q.value         = 2.5;
+
+      const envGain = audioCtx.createGain();
+      envGain.gain.value = 0;   // AudioParam を声エンベロープで制御
+
+      // 声 → エンベロープ → キャリアのゲインに注入
+      // micBoost → modBP → rect → smth → envGain.gain (AudioParam)
+      micBoost.connect(modBP);
+      modBP.connect(rect);
+      rect.connect(smth);
+      smth.connect(envGain.gain);
+
+      // 発振器 → バンドBPF → エンベロープゲイン → 出力
+      oscillator.connect(carBP);
+      carBP.connect(envGain);
+      envGain.connect(masterGain);
+
+      return { modBP, carBP, envGain };
+    });
+
+    document.getElementById('start-btn').style.display = 'none';
+    setStatus('ok', '✓ マイク起動中 — 鍵盤を押しながら声を出してください');
+
+  } catch (e) {
+    console.error(e);
+    setStatus('err', '❌ マイクエラー: ' + e.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────
+// レベルメーター
+// ─────────────────────────────────────────────────────
+function startMeter() {
+  const buf = new Uint8Array(meterAnalyser.frequencyBinCount);
+  const bar = document.getElementById('meter-bar');
+  function tick() {
+    meterAnalyser.getByteTimeDomainData(buf);
+    let mx = 0;
+    for (let v of buf) { const d = Math.abs(v - 128); if (d > mx) mx = d; }
+    bar.style.width = Math.min(100, mx * 0.78) + '%';
+    meterRaf = requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+// ─────────────────────────────────────────────────────
+// ステータス表示
+// ─────────────────────────────────────────────────────
+function setStatus(cls, msg) {
+  const el = document.getElementById('status');
+  el.className   = cls;
+  el.textContent = msg;
+}
+
+// ─────────────────────────────────────────────────────
+// 鍵盤イベント
+// ─────────────────────────────────────────────────────
+let activeEl   = null;
+let targetVol  = 0.75;
+
+function noteOn(el) {
+  if (!oscillator || el === activeEl) return;
+  noteOff();
+  el.classList.add('on');
+  activeEl = el;
+
+  const hz   = parseFloat(el.dataset.hz);
+  const midi = parseInt(el.dataset.midi);
+  oscillator.frequency.setTargetAtTime(hz, audioCtx.currentTime, 0.008);
+  masterGain.gain.setTargetAtTime(targetVol * 1.4, audioCtx.currentTime, 0.012);
+
+  const noteName = NOTE_NAMES[midi % 12];
+  const octNum   = Math.floor(midi / 12) - 1;
+  setStatus('playing', `▶  ${noteName}${octNum}   (${hz.toFixed(1)} Hz)`);
+}
+
+function noteOff() {
+  if (!activeEl) return;
+  activeEl.classList.remove('on');
+  activeEl = null;
+  if (masterGain) masterGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.04);
+  if (audioCtx)   setStatus('ok', '✓ マイク起動中 — 鍵盤を押しながら声を出してください');
+}
+
+function keyFromPoint(x, y) {
+  const els = document.elementsFromPoint(x, y);
+  return els.find(e => e.classList.contains('wk') || e.classList.contains('bk')) ?? null;
+}
+
+function setupKeyEvents() {
+  const kb = document.getElementById('keyboard');
+
+  // タッチ（iPhone）
+  kb.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (!audioCtx) return;
+    const t  = e.changedTouches[0];
+    const el = keyFromPoint(t.clientX, t.clientY);
+    if (el) noteOn(el);
+  }, { passive: false });
+
+  kb.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (!audioCtx) return;
+    const t  = e.changedTouches[0];
+    const el = keyFromPoint(t.clientX, t.clientY);
+    if (el && el !== activeEl) noteOn(el);
+  }, { passive: false });
+
+  kb.addEventListener('touchend', e => {
+    e.preventDefault();
+    noteOff();
+  }, { passive: false });
+
+  kb.addEventListener('touchcancel', e => {
+    e.preventDefault();
+    noteOff();
+  }, { passive: false });
+
+  // マウス（PCテスト用）
+  kb.addEventListener('mousedown', e => {
+    if (!audioCtx) return;
+    const el = keyFromPoint(e.clientX, e.clientY);
+    if (el) noteOn(el);
+  });
+  document.addEventListener('mousemove', e => {
+    if (!activeEl || !audioCtx) return;
+    const el = keyFromPoint(e.clientX, e.clientY);
+    if (el && el !== activeEl) noteOn(el);
+  });
+  document.addEventListener('mouseup', noteOff);
+}
+
+// ─────────────────────────────────────────────────────
+// コントロール
+// ─────────────────────────────────────────────────────
+function setupControls() {
+  // 音量
+  const volSlider = document.getElementById('ctrl-vol');
+  const valVol    = document.getElementById('val-vol');
+  volSlider.addEventListener('input', () => {
+    targetVol = parseInt(volSlider.value) / 100;
+    valVol.textContent = volSlider.value;
+    if (masterGain && activeEl) {
+      masterGain.gain.setTargetAtTime(targetVol * 1.4, audioCtx.currentTime, 0.01);
+    }
+  });
+
+  // マイク感度
+  const sensSlider = document.getElementById('ctrl-sens');
+  const valSens    = document.getElementById('val-sens');
+  sensSlider.addEventListener('input', () => {
+    valSens.textContent = sensSlider.value;
+    if (micBoost) micBoost.gain.value = parseInt(sensSlider.value);
+  });
+
+  // キャリア波形
+  const waveSelect = document.getElementById('ctrl-wave');
+  waveSelect.addEventListener('change', () => {
+    if (oscillator) oscillator.type = waveSelect.value;
+  });
+}
+
+// ─────────────────────────────────────────────────────
+// 初期化
+// ─────────────────────────────────────────────────────
+document.getElementById('start-btn').addEventListener('click', startAudio);
+buildKeyboard();
+setupKeyEvents();
+setupControls();
+</script>
+</body>
+</html>
