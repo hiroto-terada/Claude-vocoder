@@ -343,7 +343,7 @@ function bandFrequencies() {
 // グローバル Audio オブジェクト
 let audioCtx, micSource, oscillator, masterGain;
 let meterAnalyser, vocoderAnalyser;
-let vocoderRaf;
+let meterRaf, vocoderRaf;
 let bands = [];
 
 async function startAudio() {
