@@ -216,8 +216,8 @@
   </div>
   <div class="ctrl-row">
     <div class="ctrl-lbl">マイク感度</div>
-    <input type="range" id="ctrl-sens" min="1" max="60" value="30">
-    <div class="ctrl-val" id="val-sens">30</div>
+    <input type="range" id="ctrl-sens" min="5" max="60" value="25">
+    <div class="ctrl-val" id="val-sens">-25dB</div>
   </div>
   <div class="ctrl-row">
     <div class="ctrl-lbl">キャリア波形</div>
@@ -442,9 +442,11 @@ function startVocoderLoop() {
     vocoderAnalyser.getFloatFrequencyData(dbData);
 
     // 感度スライダー値でノイズフロアを決定
-    // sensVal 1-60 → noiseFloor -31 to -90 dBFS
+    // sensVal 5-60, default=25 → noiseFloor -5〜-60 dBFS
+    // iPhone 環境ノイズは約 -50〜-40 dBFS なので
+    // デフォルト -25 dBFS では声のみ通過、環境音はゲートされる
     const sensVal    = parseFloat(document.getElementById('ctrl-sens').value);
-    const noiseFloor = -(30 + sensVal);
+    const noiseFloor = -sensVal;
 
     bands.forEach(band => {
       // バンド内のビンのエネルギーを平均 (dBFS)
@@ -588,7 +590,7 @@ function setupControls() {
   const sensSlider = document.getElementById('ctrl-sens');
   const valSens    = document.getElementById('val-sens');
   sensSlider.addEventListener('input', () => {
-    valSens.textContent = sensSlider.value;
+    valSens.textContent = '-' + sensSlider.value + 'dB';
   });
 
   // キャリア波形
