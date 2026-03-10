@@ -375,17 +375,22 @@ async function startAudio() {
     vocoderAnalyser.smoothingTimeConstant = 0.5;  // 適度な追従速度
     micSource.connect(vocoderAnalyser);
 
-    // 出力チェーン: masterGain → compressor → destination
+    // 出力チェーン: masterGain → compressor → makeupGain → destination
+    // BPF で各帯域に絞られた倍音は振幅が小さいため、
+    // compressor の後に固定ブースト (makeupGain) を入れて音量を確保する
     masterGain = audioCtx.createGain();
     masterGain.gain.value = 0;  // 鍵盤押下で開く
     const comp = audioCtx.createDynamicsCompressor();
-    comp.threshold.value = -18;
+    comp.threshold.value = -24;
     comp.knee.value      = 8;
-    comp.ratio.value     = 6;
+    comp.ratio.value     = 4;
     comp.attack.value    = 0.003;
     comp.release.value   = 0.12;
+    const makeupGain = audioCtx.createGain();
+    makeupGain.gain.value = 6;  // 固定ブースト: BPF 減衰分を補償
     masterGain.connect(comp);
-    comp.connect(audioCtx.destination);
+    comp.connect(makeupGain);
+    makeupGain.connect(audioCtx.destination);
 
     // キャリア発振器
     oscillator = audioCtx.createOscillator();
@@ -456,7 +461,7 @@ function startVocoderLoop() {
       const dB = count > 0 ? sum / count : -Infinity;
 
       // dB → gain: noiseFloor 以下は完全ゼロ、そこから 40dB 幅で 0→1 にマップ
-      const gain = Math.max(0, Math.min(1.5, (dB - noiseFloor) / 40));
+      const gain = Math.max(0, Math.min(4, (dB - noiseFloor) / 30));
 
       // 滑らかに遷移 (時定数 8ms)
       band.envGain.gain.setTargetAtTime(gain, audioCtx.currentTime, 0.008);
@@ -507,7 +512,7 @@ function noteOn(el) {
   const hz   = parseFloat(el.dataset.hz);
   const midi = parseInt(el.dataset.midi);
   oscillator.frequency.setTargetAtTime(hz, audioCtx.currentTime, 0.008);
-  masterGain.gain.setTargetAtTime(targetVol * 1.4, audioCtx.currentTime, 0.012);
+  masterGain.gain.setTargetAtTime(targetVol * 3, audioCtx.currentTime, 0.012);
 
   const noteName = NOTE_NAMES[midi % 12];
   const octNum   = Math.floor(midi / 12) - 1;
