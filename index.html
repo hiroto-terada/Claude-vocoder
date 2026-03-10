@@ -216,8 +216,8 @@
   </div>
   <div class="ctrl-row">
     <div class="ctrl-lbl">マイク感度</div>
-    <input type="range" id="ctrl-sens" min="1" max="30" value="10">
-    <div class="ctrl-val" id="val-sens">10</div>
+    <input type="range" id="ctrl-sens" min="1" max="60" value="20">
+    <div class="ctrl-val" id="val-sens">20</div>
   </div>
   <div class="ctrl-row">
     <div class="ctrl-lbl">キャリア波形</div>
@@ -323,10 +323,10 @@ function buildKeyboard() {
 // ─────────────────────────────────────────────────────
 // ボコーダー (Web Audio API)
 // ─────────────────────────────────────────────────────
-const NUM_BANDS  = 16;
+const NUM_BANDS  = 24;
 const FREQ_MIN   = 80;
 const FREQ_MAX   = 8000;
-const ENV_HZ     = 25;   // エンベロープフォロワーのカットオフ
+const ENV_HZ     = 20;   // エンベロープフォロワーのカットオフ
 
 function bandFrequencies() {
   return Array.from({ length: NUM_BANDS }, (_, i) =>
@@ -345,9 +345,10 @@ function makeAbsShaper(ctx) {
 }
 
 // グローバル Audio オブジェクト
-let audioCtx, micSource, oscillator, masterGain, micBoost;
+let audioCtx, micSource, oscillator, masterGain;
 let meterAnalyser, meterRaf;
 let bands = [];
+let envScalers = [];  // エンベロープのスケーリング (感度スライダーで制御)
 
 async function startAudio() {
   try {
@@ -366,12 +367,7 @@ async function startAudio() {
     });
     micSource = audioCtx.createMediaStreamSource(stream);
 
-    // マイク感度ゲイン
-    micBoost = audioCtx.createGain();
-    micBoost.gain.value = parseFloat(document.getElementById('ctrl-sens').value);
-    micSource.connect(micBoost);
-
-    // レベルメーター用アナライザ
+    // レベルメーター用アナライザ (マイク直接接続)
     meterAnalyser = audioCtx.createAnalyser();
     meterAnalyser.fftSize = 256;
     micSource.connect(meterAnalyser);
@@ -380,7 +376,16 @@ async function startAudio() {
     // マスターゲイン (鍵盤押下で開く)
     masterGain = audioCtx.createGain();
     masterGain.gain.value = 0;
-    masterGain.connect(audioCtx.destination);
+
+    // 出力コンプレッサー: 音量を自動整形してロボット声をはっきり出す
+    const comp = audioCtx.createDynamicsCompressor();
+    comp.threshold.value = -18;
+    comp.knee.value      = 8;
+    comp.ratio.value     = 6;
+    comp.attack.value    = 0.003;
+    comp.release.value   = 0.12;
+    masterGain.connect(comp);
+    comp.connect(audioCtx.destination);
 
     // キャリア発振器
     oscillator = audioCtx.createOscillator();
@@ -389,43 +394,55 @@ async function startAudio() {
     oscillator.start();
 
     // ボコーダーバンドを構築
+    // 【修正ポイント】micBoost をボコーダー前段に置くと WaveShaper がクリップし
+    // エンベロープが常に最大値→発振器の音がそのまま通過してしまう。
+    // 代わりに smoother の後に envScaler を置いて感度を調整する。
+    envScalers = [];
     const freqs = bandFrequencies();
+    const initSens = parseFloat(document.getElementById('ctrl-sens').value);
+
     bands = freqs.map(f => {
       // ── モジュレーター (声) チェーン ──────────────────
+      // mic → modBP → |x| → smoother → envScaler → envGain.gain
       const modBP = audioCtx.createBiquadFilter();
       modBP.type            = 'bandpass';
       modBP.frequency.value = f;
-      modBP.Q.value         = 2.5;
+      modBP.Q.value         = 2.0;   // 24バンドに合わせて調整
 
-      const rect = makeAbsShaper(audioCtx);   // |x| → 半波整流
+      const rect = makeAbsShaper(audioCtx);   // |x| 全波整流
 
       const smth = audioCtx.createBiquadFilter();  // エンベロープ平滑化
       smth.type            = 'lowpass';
       smth.frequency.value = ENV_HZ;
       smth.Q.value         = 0.5;
 
+      // smoother の後にスケーラーを置く（ここを感度スライダーで制御）
+      const envScaler = audioCtx.createGain();
+      envScaler.gain.value = initSens;
+      envScalers.push(envScaler);
+
       // ── キャリア (発振器) チェーン ────────────────────
       const carBP = audioCtx.createBiquadFilter();
       carBP.type            = 'bandpass';
       carBP.frequency.value = f;
-      carBP.Q.value         = 2.5;
+      carBP.Q.value         = 2.0;
 
       const envGain = audioCtx.createGain();
       envGain.gain.value = 0;   // AudioParam を声エンベロープで制御
 
-      // 声 → エンベロープ → キャリアのゲインに注入
-      // micBoost → modBP → rect → smth → envGain.gain (AudioParam)
-      micBoost.connect(modBP);
+      // 声チェーン: micSource → modBP → rect → smth → envScaler → envGain.gain
+      micSource.connect(modBP);
       modBP.connect(rect);
       rect.connect(smth);
-      smth.connect(envGain.gain);
+      smth.connect(envScaler);
+      envScaler.connect(envGain.gain);
 
-      // 発振器 → バンドBPF → エンベロープゲイン → 出力
+      // 発振器チェーン: osc → carBP → envGain → masterGain
       oscillator.connect(carBP);
       carBP.connect(envGain);
       envGain.connect(masterGain);
 
-      return { modBP, carBP, envGain };
+      return { modBP, carBP, envGain, envScaler };
     });
 
     document.getElementById('start-btn').style.display = 'none';
@@ -556,12 +573,13 @@ function setupControls() {
     }
   });
 
-  // マイク感度
+  // マイク感度 → envScaler ゲインを全バンドに適用
   const sensSlider = document.getElementById('ctrl-sens');
   const valSens    = document.getElementById('val-sens');
   sensSlider.addEventListener('input', () => {
     valSens.textContent = sensSlider.value;
-    if (micBoost) micBoost.gain.value = parseInt(sensSlider.value);
+    const v = parseFloat(sensSlider.value);
+    envScalers.forEach(s => { s.gain.value = v; });
   });
 
   // キャリア波形
